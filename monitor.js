@@ -76,7 +76,7 @@ async function sendListing(item) {
     `<b>${escapeHtml(item.title || "New listing")}</b>`,
     item.price ? `💷 ${escapeHtml(item.price)}` : "",
     item.size ? `📏 ${escapeHtml(item.size)}` : "",
-    item.brand ? `🏷 ${escapeHtml(item.brand)}` : "",
+    `🏷 Drake's`,
     "",
     `<a href="${item.url}">OPEN ON VINTED</a>`
   ]
@@ -125,114 +125,9 @@ async function extractListings(page) {
           location.origin
         );
 
-        const match =
-          url.pathname.match(/\/items\/(\d+)/);
-
-        if (!match) continue;
-
-        const id = match[1];
-
-        if (seen.has(id)) continue;
-
-        const card =
-          link.closest(
-            '[data-testid*="item"], article, li, div[class*="feed-grid"] > div'
-          ) ||
-          link.parentElement?.parentElement ||
-          link;
-
-        const text =
-          (card.innerText || link.innerText || "")
-            .replace(/\s+/g, " ")
-            .trim();
-
-        /*
-         * IMPORTANT:
-         * Ignore recommendations, adverts and unrelated
-         * listings unless the card actually identifies
-         * the brand as Drake's.
-         */
-        const isDrakes =
-          /\bdrake['’]?s\b/i.test(text);
-
-        if (!isDrakes) {
-          continue;
-        }
-
-        const image =
-          card.querySelector("img")?.src ||
-          link.querySelector("img")?.src ||
-          "";
-
-        const lines =
-          (card.innerText || "")
-            .split("\n")
-            .map(x => x.trim())
-            .filter(Boolean);
-
-        let price = "";
-        let size = "";
-
-        for (const line of lines) {
-          if (
-            !price &&
-            /£\s?\d|GBP/i.test(line)
-          ) {
-            price = line;
-          }
-
-          if (
-            !size &&
-            /^(XS|S|M|L|XL|XXL|\d{1,2}(\.\d)?|UK\s?\d+)/i.test(line)
-          ) {
-            size = line;
-          }
-        }
-
-        const title =
-          link.getAttribute("title") ||
-          link.querySelector("img")?.alt ||
-          lines[0] ||
-          text.slice(0, 150) ||
-          `Vinted item ${id}`;
-
-        seen.add(id);
-
-        results.push({
-          id,
-          url: url.href,
-          title,
-          price,
-          size,
-          brand: "Drake's",
-          image
-        });
-
-      } catch {}
-    }
-
-    return results;
-  });
-}
-  return await page.evaluate(() => {
-    const results = [];
-    const seen = new Set();
-
-    const links = [
-      ...document.querySelectorAll(
-        'a[href*="/items/"]'
-      )
-    ];
-
-    for (const link of links) {
-      try {
-        const url = new URL(
-          link.href,
-          location.origin
+        const match = url.pathname.match(
+          /\/items\/(\d+)/
         );
-
-        const match =
-          url.pathname.match(/\/items\/(\d+)/);
 
         if (!match) continue;
 
@@ -247,25 +142,36 @@ async function extractListings(page) {
           link.parentElement?.parentElement ||
           link;
 
-        const text =
-          (card.innerText || link.innerText || "")
-            .replace(/\s+/g, " ")
-            .trim();
+        const rawText =
+          card?.innerText ||
+          link.innerText ||
+          "";
+
+        const text = rawText
+          .replace(/\s+/g, " ")
+          .trim();
+
+        /*
+         * Strict Drake's filter.
+         * Ignore recommendations/adverts/unrelated items
+         * unless the card text explicitly contains Drake's.
+         */
+        if (!/\bdrake['’]?s\b/i.test(text)) {
+          continue;
+        }
 
         const image =
-          card.querySelector("img")?.src ||
+          card?.querySelector("img")?.src ||
           link.querySelector("img")?.src ||
           "";
 
-        const lines =
-          (card.innerText || "")
-            .split("\n")
-            .map(x => x.trim())
-            .filter(Boolean);
+        const lines = rawText
+          .split("\n")
+          .map(x => x.trim())
+          .filter(Boolean);
 
         let price = "";
         let size = "";
-        let brand = "";
 
         for (const line of lines) {
           if (
@@ -277,18 +183,9 @@ async function extractListings(page) {
 
           if (
             !size &&
-            /^(XS|S|M|L|XL|XXL|\d{1,2}(\.\d)?|UK\s?\d+)/i.test(
-              line
-            )
+            /^(XXS|XS|S|M|L|XL|XXL|XXXL|\d{1,2}(\.\d)?|UK\s?\d+)/i.test(line)
           ) {
             size = line;
-          }
-
-          if (
-            !brand &&
-            /drake'?s/i.test(line)
-          ) {
-            brand = "Drake's";
           }
         }
 
@@ -296,7 +193,6 @@ async function extractListings(page) {
           link.getAttribute("title") ||
           link.querySelector("img")?.alt ||
           lines[0] ||
-          text.slice(0, 150) ||
           `Vinted item ${id}`;
 
         seen.add(id);
@@ -307,10 +203,12 @@ async function extractListings(page) {
           title,
           price,
           size,
-          brand,
           image
         });
-      } catch {}
+
+      } catch {
+        // Ignore malformed links/cards.
+      }
     }
 
     return results;
@@ -350,10 +248,13 @@ async function main() {
 
   while (true) {
     try {
-      await page.goto(VINTED_SEARCH_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 45000
-      });
+      await page.goto(
+        VINTED_SEARCH_URL,
+        {
+          waitUntil: "domcontentloaded",
+          timeout: 45000
+        }
+      );
 
       await page.waitForTimeout(2500);
 
@@ -376,7 +277,7 @@ async function main() {
         baselineDone = true;
 
         console.log(
-          `✅ Baseline saved with ${seen.size} existing listing(s).`
+          `✅ Baseline saved with ${seen.size} existing Drake's listing(s).`
         );
       }
 
@@ -386,15 +287,11 @@ async function main() {
             item => !seen.has(item.id)
           );
 
-        if (newListings.length) {
+        if (newListings.length > 0) {
           console.log(
-            `🚨 ${newListings.length} NEW Vinted listing(s)!`
+            `🚨 ${newListings.length} NEW Drake's listing(s)!`
           );
 
-          /*
-           * Oldest first so Telegram alerts
-           * appear in sensible order.
-           */
           for (
             const item of [...newListings].reverse()
           ) {
@@ -407,6 +304,7 @@ async function main() {
               console.log(
                 `✅ Alert sent for Vinted item ${item.id}.`
               );
+
             } catch (error) {
               console.error(
                 `Telegram failed for ${item.id}:`,
@@ -414,8 +312,11 @@ async function main() {
               );
             }
           }
+
         } else {
-          console.log("No new listings.");
+          console.log(
+            "No new Drake's listings."
+          );
         }
       }
 
@@ -430,11 +331,6 @@ async function main() {
       );
     }
 
-    /*
-     * Normal: chosen interval.
-     * Repeated errors: slow down automatically
-     * rather than hammering Vinted.
-     */
     const delay =
       consecutiveErrors >= 3
         ? 60000
