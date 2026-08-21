@@ -13,6 +13,11 @@ const {
 const SEARCH_URL =
   "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1&order=newest_first";
 
+/*
+ * Only monitor the newest visible cards.
+ */
+const MONITOR_TOP_N = 30;
+
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("❌ Missing Telegram variables.");
   process.exit(1);
@@ -22,7 +27,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const SEEN_FILE = path.join(
   DATA_DIR,
-  "vinted_visible_seen.json"
+  "vinted_visible_newest_seen.json"
 );
 
 function sleep(ms) {
@@ -56,7 +61,9 @@ function escapeHtml(value = "") {
 }
 
 function parseCookieString(cookieString) {
-  if (!cookieString) return [];
+  if (!cookieString) {
+    return [];
+  }
 
   return cookieString
     .split(";")
@@ -65,7 +72,9 @@ function parseCookieString(cookieString) {
     .map(part => {
       const index = part.indexOf("=");
 
-      if (index === -1) return null;
+      if (index === -1) {
+        return null;
+      }
 
       const name =
         part.slice(0, index).trim();
@@ -73,7 +82,9 @@ function parseCookieString(cookieString) {
       const value =
         part.slice(index + 1).trim();
 
-      if (!name) return null;
+      if (!name) {
+        return null;
+      }
 
       return {
         name,
@@ -137,10 +148,9 @@ async function sendTelegram(item) {
       );
 
       return;
-
     } catch (error) {
       console.log(
-        "Photo failed, sending text:",
+        "Photo failed, using text:",
         error.message
       );
     }
@@ -157,197 +167,238 @@ async function sendTelegram(item) {
   );
 }
 
-async function extractVisibleItems(page) {
-  return await page.evaluate(() => {
-    const results = [];
-    const usedIds = new Set();
+async function extractNewestVisibleItems(page) {
+  return await page.evaluate(
+    topN => {
+      const output = [];
+      const usedIds = new Set();
 
-    const links =
-      Array.from(
+      const links = Array.from(
         document.querySelectorAll(
           'a[href*="/items/"]'
         )
       );
 
-    for (const link of links) {
-      try {
-        const url =
-          new URL(
-            link.href,
-            window.location.origin
-          );
-
-        const match =
-          url.pathname.match(
-            /\/items\/(\d+)/
-          );
-
-        if (!match) continue;
-
-        const id = match[1];
-
-        if (usedIds.has(id)) {
-          continue;
-        }
-
-        /*
-         * Find the surrounding Vinted product card.
-         */
-        let card = link;
-
-        for (let i = 0; i < 6; i++) {
-          if (!card.parentElement) break;
-
-          card = card.parentElement;
-
-          const text =
-            card.innerText || "";
-
-          const hasPrice =
-            /£\s?\d/.test(text);
-
-          const hasImage =
-            Boolean(
-              card.querySelector("img")
+      for (const link of links) {
+        try {
+          const url =
+            new URL(
+              link.href,
+              location.origin
             );
 
-          if (hasPrice && hasImage) {
-            break;
+          const match =
+            url.pathname.match(
+              /\/items\/(\d+)/
+            );
+
+          if (!match) {
+            continue;
           }
-        }
 
-        const rawText =
-          card?.innerText ||
-          link.innerText ||
-          "";
+          const id = match[1];
 
-        const lines =
-          rawText
-            .split("\n")
-            .map(x => x.trim())
-            .filter(Boolean);
-
-        /*
-         * Require Drake's to be visible on the card.
-         * This is a final defensive check.
-         */
-        const combined =
-          lines.join(" ");
-
-        if (
-          !/\bdrake['’]?s\b/i.test(
-            combined
-          )
-        ) {
-          continue;
-        }
-
-        const image =
-          card?.querySelector("img")?.src ||
-          link.querySelector("img")?.src ||
-          "";
-
-        const imageAlt =
-          card?.querySelector("img")?.alt ||
-          "";
-
-        let price = "";
-
-        for (const line of lines) {
-          if (
-            /^£\s?\d/.test(line) ||
-            /£\d/.test(line)
-          ) {
-            price = line;
-            break;
+          if (usedIds.has(id)) {
+            continue;
           }
-        }
 
-        /*
-         * Vinted card text normally includes:
-         *
-         * Drake's
-         * size · condition
-         * £price
-         *
-         * The image alt/title often contains
-         * the actual listing title.
-         */
-        let title =
-          link.getAttribute("title") ||
-          imageAlt ||
-          "";
-
-        if (!title) {
           /*
-           * Fall back to URL slug.
+           * Find a sensible surrounding product card.
            */
-          const slug =
-            url.pathname
-              .replace(
-                `/items/${id}-`,
-                ""
-              )
-              .replaceAll("-", " ");
+          let card = link;
+
+          for (let i = 0; i < 7; i++) {
+            if (!card.parentElement) {
+              break;
+            }
+
+            card = card.parentElement;
+
+            const text =
+              card.innerText || "";
+
+            const hasImage =
+              Boolean(
+                card.querySelector("img")
+              );
+
+            const hasPrice =
+              /£\s?\d/.test(text);
+
+            if (hasImage && hasPrice) {
+              break;
+            }
+          }
+
+          if (!card) {
+            continue;
+          }
+
+          const style =
+            window.getComputedStyle(card);
+
+          const rect =
+            card.getBoundingClientRect();
+
+          /*
+           * Reject invisible/hidden DOM cards.
+           */
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            Number(style.opacity) === 0 ||
+            rect.width < 40 ||
+            rect.height < 40
+          ) {
+            continue;
+          }
+
+          /*
+           * Only use cards that are actually laid out
+           * near the rendered search results.
+           */
+          if (
+            rect.bottom < 0 ||
+            rect.top > document.documentElement.scrollHeight
+          ) {
+            continue;
+          }
+
+          const rawText =
+            card.innerText || "";
+
+          const lines =
+            rawText
+              .split("\n")
+              .map(x => x.trim())
+              .filter(Boolean);
+
+          /*
+           * Make sure it's actually one of the
+           * Drake's cards shown on this page.
+           */
+          const combined =
+            lines.join(" ");
+
+          if (
+            !/\bdrake['’]?s\b/i.test(
+              combined
+            )
+          ) {
+            continue;
+          }
+
+          const img =
+            card.querySelector("img");
+
+          const image =
+            img?.currentSrc ||
+            img?.src ||
+            "";
+
+          const imageAlt =
+            img?.alt ||
+            "";
+
+          let title =
+            link.getAttribute("title") ||
+            imageAlt ||
+            "";
+
+          if (!title) {
+            title =
+              url.pathname
+                .replace(
+                  `/items/${id}-`,
+                  ""
+                )
+                .replaceAll("-", " ");
+          }
 
           title =
-            slug ||
-            `Drake's item ${id}`;
+            String(title)
+              .replace(/\s+/g, " ")
+              .trim();
+
+          let price = "";
+
+          for (const line of lines) {
+            if (/^£\s?\d/.test(line)) {
+              price = line;
+              break;
+            }
+          }
+
+          const details =
+            lines
+              .filter(line => {
+                if (
+                  line === price ||
+                  /^£\s?\d/.test(line)
+                ) {
+                  return false;
+                }
+
+                return true;
+              })
+              .slice(0, 3)
+              .join(" · ");
+
+          output.push({
+            id,
+            title,
+            details,
+            price,
+            image,
+            url: url.href,
+            top: rect.top + window.scrollY,
+            left: rect.left
+          });
+
+          usedIds.add(id);
+
+        } catch {
+          // Ignore malformed DOM entries.
         }
-
-        /*
-         * Clean Vinted image alt text when it
-         * contains extra wording.
-         */
-        title =
-          String(title)
-            .replace(/\s+/g, " ")
-            .trim();
-
-        const details =
-          lines
-            .filter(line => {
-              if (line === price) return false;
-
-              if (
-                /^£\s?\d/.test(line)
-              ) {
-                return false;
-              }
-
-              return true;
-            })
-            .slice(0, 3)
-            .join(" · ");
-
-        usedIds.add(id);
-
-        results.push({
-          id,
-          title,
-          details,
-          price,
-          image,
-          url: url.href
-        });
-
-      } catch {
-        // Ignore malformed cards.
       }
-    }
 
-    return results;
-  });
+      /*
+       * Critical:
+       * sort by actual displayed position.
+       *
+       * Top row first, then left → right.
+       */
+      output.sort(
+        (a, b) => {
+          const rowDifference =
+            a.top - b.top;
+
+          if (
+            Math.abs(rowDifference) > 20
+          ) {
+            return rowDifference;
+          }
+
+          return a.left - b.left;
+        }
+      );
+
+      return output.slice(
+        0,
+        topN
+      );
+    },
+    MONITOR_TOP_N
+  );
 }
 
 async function loadNewestPage(page) {
-  /*
-   * Change the existing Vinted time parameter
-   * each visit to discourage cached results.
-   */
   const url =
     new URL(SEARCH_URL);
 
+  /*
+   * Fresh timestamp to avoid stale results.
+   */
   url.searchParams.set(
     "time",
     String(
@@ -363,10 +414,6 @@ async function loadNewestPage(page) {
     }
   );
 
-  /*
-   * Wait for actual item links rather than an
-   * arbitrary network request.
-   */
   try {
     await page.waitForSelector(
       'a[href*="/items/"]',
@@ -376,16 +423,24 @@ async function loadNewestPage(page) {
     );
   } catch {
     throw new Error(
-      "No Vinted item cards appeared on the page."
+      "No Vinted listing cards appeared."
     );
   }
 
   /*
-   * Give React a little time to finish rendering.
+   * Ensure we're at the actual top of newest-first.
    */
-  await page.waitForTimeout(1200);
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+  });
 
-  return await extractVisibleItems(page);
+  await page.waitForTimeout(
+    1500
+  );
+
+  return await extractNewestVisibleItems(
+    page
+  );
 }
 
 async function main() {
@@ -396,11 +451,11 @@ async function main() {
   );
 
   console.log(
-    "🚀 Starting ACTUAL Vinted page monitor."
+    "🚀 Starting visible newest-first Drake's monitor."
   );
 
   console.log(
-    "🇬🇧 Drake's — Newest first"
+    `Watching top ${MONITOR_TOP_N} visible listings.`
   );
 
   console.log(
@@ -432,36 +487,24 @@ async function main() {
         "Chrome/140.0.0.0 Safari/537.36"
     });
 
-  /*
-   * If you added your UK Vinted cookie in
-   * Railway, apply it to the real browser.
-   */
   if (VINTED_COOKIE) {
-    try {
-      const cookies =
-        parseCookieString(
-          VINTED_COOKIE
-        );
+    const cookies =
+      parseCookieString(
+        VINTED_COOKIE
+      );
 
-      if (cookies.length > 0) {
-        await context.addCookies(
-          cookies
-        );
+    if (cookies.length > 0) {
+      await context.addCookies(
+        cookies
+      );
 
-        console.log(
-          `✅ Loaded ${cookies.length} Vinted session cookie(s).`
-        );
-      }
-
-    } catch (error) {
       console.log(
-        "Cookie warning:",
-        error.message
+        `✅ Loaded ${cookies.length} Vinted session cookie(s).`
       );
     }
   }
 
-  const page =
+  let page =
     await context.newPage();
 
   let baselineDone =
@@ -475,7 +518,7 @@ async function main() {
 
     try {
       console.log(
-        "🔄 Loading Drake's newest-first page..."
+        "🔄 Loading newest-first page..."
       );
 
       const items =
@@ -484,35 +527,31 @@ async function main() {
         );
 
       console.log(
-        `✅ Page contains ${items.length} Drake's item(s).`
+        `✅ Monitoring ${items.length} top visible listing(s).`
       );
 
-      /*
-       * This is the crucial diagnostic.
-       *
-       * Compare these to the first products
-       * shown on your own Vinted page.
-       */
       console.log(
-        "TOP VISIBLE ITEMS:"
+        "TOP 10 VISIBLE:"
       );
 
       for (
-        const item of items.slice(0, 8)
+        const item of items.slice(0, 10)
       ) {
         console.log(
           `${item.id} | ${item.title} | ${item.price}`
         );
       }
 
-      if (items.length === 0) {
+      if (
+        items.length === 0
+      ) {
         throw new Error(
-          "Page loaded but no Drake's cards were extracted."
+          "No visible Drake's cards extracted."
         );
       }
 
       /*
-       * Establish baseline on first successful run.
+       * First successful run becomes baseline.
        */
       if (!baselineDone) {
         for (const item of items) {
@@ -526,7 +565,7 @@ async function main() {
         baselineDone = true;
 
         console.log(
-          `✅ Baseline created with ${seen.size} current item(s).`
+          `✅ Baseline created with ${seen.size} visible listings.`
         );
       }
 
@@ -540,11 +579,13 @@ async function main() {
           );
 
         /*
-         * Protect against another accidental flood.
+         * Only newly appearing TOP listings qualify.
          */
-        if (newItems.length > 8) {
+        if (
+          newItems.length > 6
+        ) {
           console.error(
-            `🛑 SAFETY LOCK: ${newItems.length} unseen items appeared.`
+            `🛑 SAFETY LOCK: ${newItems.length} unseen top listings.`
           );
 
           console.error(
@@ -556,22 +597,23 @@ async function main() {
           newItems.length === 0
         ) {
           console.log(
-            "No new Drake's listings."
+            "No new top Drake's listings."
           );
         }
 
         else {
           console.log(
-            `🚨 ${newItems.length} NEW LISTING(S)!`
+            `🚨 ${newItems.length} NEW TOP LISTING(S)!`
           );
 
-          for (
-            const item of
-              [...newItems].reverse()
-          ) {
+          /*
+           * Because items are already in visible
+           * newest-first order, send newest first.
+           */
+          for (const item of newItems) {
             try {
               console.log(
-                `🚨 NEW: ${item.id} | ${item.title}`
+                `🚨 NEW TOP ITEM: ${item.id} | ${item.title}`
               );
 
               await sendTelegram(
@@ -598,6 +640,21 @@ async function main() {
             }
           }
         }
+
+        /*
+         * Remember every currently visible top item,
+         * even if it wasn't alerted due to safety.
+         *
+         * This prevents old cards moving around the
+         * page from later becoming fake "new" alerts.
+         */
+        for (const item of items) {
+          seen.add(
+            String(item.id)
+          );
+        }
+
+        saveSeen(seen);
       }
 
       errors = 0;
@@ -611,10 +668,6 @@ async function main() {
       );
 
       if (errors >= 3) {
-        console.log(
-          "♻️ Creating fresh Vinted page..."
-        );
-
         try {
           await page.close();
         } catch {}
@@ -623,12 +676,15 @@ async function main() {
           await context.newPage();
 
         errors = 0;
+
+        console.log(
+          "♻️ Fresh Vinted page created."
+        );
       }
     }
 
     const elapsed =
-      Date.now() -
-      started;
+      Date.now() - started;
 
     const target =
       Number(
