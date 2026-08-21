@@ -76,6 +76,7 @@ async function sendListing(item) {
     `<b>${escapeHtml(item.title || "New listing")}</b>`,
     item.price ? `💷 ${escapeHtml(item.price)}` : "",
     item.size ? `📏 ${escapeHtml(item.size)}` : "",
+    item.condition ? `✨ ${escapeHtml(item.condition)}` : "",
     `🏷 Drake's`,
     "",
     `<a href="${item.url}">OPEN ON VINTED</a>`
@@ -91,7 +92,6 @@ async function sendListing(item) {
         caption,
         parse_mode: "HTML"
       });
-
       return;
     } catch (error) {
       console.log(
@@ -109,35 +109,222 @@ async function sendListing(item) {
   });
 }
 
+function normalizeItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+
+  const id =
+    raw.id ||
+    raw.item_id ||
+    raw.itemId;
+
+  if (!id) return null;
+
+  const brandName =
+    raw.brand_title ||
+    raw.brand_name ||
+    raw.brand?.title ||
+    raw.brand?.name ||
+    "";
+
+  const title =
+    raw.title ||
+    raw.name ||
+    raw.description ||
+    `Vinted item ${id}`;
+
+  const price =
+    raw.price?.amount
+      ? `£${raw.price.amount}`
+      : raw.price_numeric
+      ? `£${raw.price_numeric}`
+      : typeof raw.price === "string"
+      ? raw.price
+      : "";
+
+  const image =
+    raw.photo?.url ||
+    raw.photo?.full_size_url ||
+    raw.photos?.[0]?.url ||
+    raw.photos?.[0]?.full_size_url ||
+    raw.image?.url ||
+    "";
+
+  const size =
+    raw.size_title ||
+    raw.size ||
+    raw.size?.title ||
+    "";
+
+  const condition =
+    raw.status ||
+    raw.condition ||
+    raw.status_title ||
+    "";
+
+  const url =
+    raw.url ||
+    `https://www.vinted.co.uk/items/${id}`;
+
+  const combined =
+    `${brandName} ${title}`.toLowerCase();
+
+  if (!combined.match(/drake['’]?s/)) {
+    return null;
+  }
+
+  return {
+    id: String(id),
+    title: String(title),
+    price: String(price || ""),
+    image: String(image || ""),
+    size: String(size || ""),
+    condition: String(condition || ""),
+    url: String(url)
+  };
+}
+
 async function extractListings(page) {
   return await page.evaluate(() => {
-    const results = [];
-    const seen = new Set();
+    const out = new Map();
 
-    const links = [
-      ...document.querySelectorAll('a[href*="/items/"]')
-    ];
+    function add(item) {
+      if (!item || !item.id) return;
+      out.set(String(item.id), item);
+    }
 
-    for (const link of links) {
+    function normalize(raw) {
+      if (!raw || typeof raw !== "object") return null;
+
+      const id =
+        raw.id ||
+        raw.item_id ||
+        raw.itemId;
+
+      if (!id) return null;
+
+      const brandName =
+        raw.brand_title ||
+        raw.brand_name ||
+        raw.brand?.title ||
+        raw.brand?.name ||
+        "";
+
+      const title =
+        raw.title ||
+        raw.name ||
+        raw.description ||
+        `Vinted item ${id}`;
+
+      const price =
+        raw.price?.amount
+          ? `£${raw.price.amount}`
+          : raw.price_numeric
+          ? `£${raw.price_numeric}`
+          : typeof raw.price === "string"
+          ? raw.price
+          : "";
+
+      const image =
+        raw.photo?.url ||
+        raw.photo?.full_size_url ||
+        raw.photos?.[0]?.url ||
+        raw.photos?.[0]?.full_size_url ||
+        raw.image?.url ||
+        "";
+
+      const size =
+        raw.size_title ||
+        raw.size?.title ||
+        raw.size ||
+        "";
+
+      const condition =
+        raw.status ||
+        raw.condition ||
+        raw.status_title ||
+        "";
+
+      const url =
+        raw.url ||
+        `https://www.vinted.co.uk/items/${id}`;
+
+      const combined =
+        `${brandName} ${title}`.toLowerCase();
+
+      if (!/drake['’]?s/.test(combined)) {
+        return null;
+      }
+
+      return {
+        id: String(id),
+        title: String(title),
+        price: String(price || ""),
+        image: String(image || ""),
+        size: String(size || ""),
+        condition: String(condition || ""),
+        url: String(url)
+      };
+    }
+
+    function walk(value, depth = 0) {
+      if (depth > 8 || value == null) return;
+
+      if (Array.isArray(value)) {
+        for (const x of value) {
+          walk(x, depth + 1);
+        }
+        return;
+      }
+
+      if (typeof value === "object") {
+        const candidate = normalize(value);
+        if (candidate) add(candidate);
+
+        for (const v of Object.values(value)) {
+          walk(v, depth + 1);
+        }
+      }
+    }
+
+    // 1) Inspect embedded JSON/state scripts
+    for (const script of document.querySelectorAll("script")) {
+      const text = script.textContent || "";
+
+      if (
+        !text.includes("Drake") &&
+        !text.includes("drake") &&
+        !text.includes("/items/")
+      ) {
+        continue;
+      }
+
       try {
-        const url = new URL(
-          link.href,
-          location.origin
-        );
+        const parsed = JSON.parse(text);
+        walk(parsed);
+      } catch {
+        // Not pure JSON, ignore.
+      }
+    }
 
-        const match = url.pathname.match(
-          /\/items\/(\d+)/
-        );
+    // 2) Inspect global Next/SSR state if present
+    try {
+      if (window.__NEXT_DATA__) {
+        walk(window.__NEXT_DATA__);
+      }
+    } catch {}
 
+    // 3) Fall back to visible links/cards
+    for (const link of document.querySelectorAll('a[href*="/items/"]')) {
+      try {
+        const url = new URL(link.href, location.origin);
+        const match = url.pathname.match(/\/items\/(\d+)/);
         if (!match) continue;
 
         const id = match[1];
 
-        if (seen.has(id)) continue;
-
         const card =
           link.closest(
-            '[data-testid*="item"], article, li'
+            '[data-testid*="item"], article, li, [class*="feed-grid"]'
           ) ||
           link.parentElement?.parentElement ||
           link;
@@ -147,37 +334,25 @@ async function extractListings(page) {
           link.innerText ||
           "";
 
-        const text = rawText
-          .replace(/\s+/g, " ")
-          .trim();
+        const text =
+          rawText.replace(/\s+/g, " ").trim();
 
-        /*
-         * Strict Drake's filter.
-         * Ignore recommendations/adverts/unrelated items
-         * unless the card text explicitly contains Drake's.
-         */
         if (!/\bdrake['’]?s\b/i.test(text)) {
           continue;
         }
 
-        const image =
-          card?.querySelector("img")?.src ||
-          link.querySelector("img")?.src ||
-          "";
-
-        const lines = rawText
-          .split("\n")
-          .map(x => x.trim())
-          .filter(Boolean);
+        const lines =
+          rawText
+            .split("\n")
+            .map(x => x.trim())
+            .filter(Boolean);
 
         let price = "";
         let size = "";
+        let condition = "";
 
         for (const line of lines) {
-          if (
-            !price &&
-            /£\s?\d|GBP/i.test(line)
-          ) {
+          if (!price && /£\s?\d/.test(line)) {
             price = line;
           }
 
@@ -187,31 +362,35 @@ async function extractListings(page) {
           ) {
             size = line;
           }
+
+          if (
+            !condition &&
+            /(new with tags|new without tags|very good|good|satisfactory)/i.test(line)
+          ) {
+            condition = line;
+          }
         }
 
-        const title =
-          link.getAttribute("title") ||
-          link.querySelector("img")?.alt ||
-          lines[0] ||
-          `Vinted item ${id}`;
-
-        seen.add(id);
-
-        results.push({
+        add({
           id,
-          url: url.href,
-          title,
+          title:
+            link.getAttribute("title") ||
+            link.querySelector("img")?.alt ||
+            lines[0] ||
+            `Vinted item ${id}`,
           price,
           size,
-          image
+          condition,
+          image:
+            card?.querySelector("img")?.src ||
+            link.querySelector("img")?.src ||
+            "",
+          url: url.href
         });
-
-      } catch {
-        // Ignore malformed links/cards.
-      }
+      } catch {}
     }
 
-    return results;
+    return [...out.values()];
   });
 }
 
@@ -251,12 +430,12 @@ async function main() {
       await page.goto(
         VINTED_SEARCH_URL,
         {
-          waitUntil: "domcontentloaded",
-          timeout: 45000
+          waitUntil: "networkidle",
+          timeout: 60000
         }
       );
 
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(2000);
 
       const listings =
         await extractListings(page);
