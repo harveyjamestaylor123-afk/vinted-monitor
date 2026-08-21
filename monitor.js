@@ -1,13 +1,10 @@
 import fs from "fs";
 import path from "path";
-import { chromium } from "playwright";
 
 const {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   CHECK_INTERVAL_SECONDS = "10",
-  VINTED_SEARCH_URL =
-    "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1",
   DATA_DIR = "/data"
 } = process.env;
 
@@ -19,6 +16,9 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const seenFile = path.join(DATA_DIR, "seen_vinted.json");
+
+const BASE_API =
+  "https://api.vinted.co.uk/svc-catalogue/items";
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -69,24 +69,86 @@ async function telegramRequest(method, body) {
   }
 }
 
-function photoUrl(item) {
-  return (
+function buildApiUrl() {
+  const url = new URL(BASE_API);
+
+  url.searchParams.set("page", "1");
+  url.searchParams.set("per_page", "96");
+
+  /*
+   * Fresh timestamp each request.
+   */
+  url.searchParams.set(
+    "time",
+    String(Math.floor(Date.now() / 1000))
+  );
+
+  url.searchParams.set(
+    "search_text",
+    "drakes"
+  );
+
+  /*
+   * Try newest first.
+   */
+  url.searchParams.set(
+    "order",
+    "newest_first"
+  );
+
+  url.searchParams.set(
+    "attribute_ids[brand]",
+    "389025"
+  );
+
+  url.searchParams.set(
+    "attribute_ids[catalog]",
+    ""
+  );
+
+  url.searchParams.set(
+    "attribute_ids[size]",
+    ""
+  );
+
+  url.searchParams.set(
+    "attribute_ids[status]",
+    ""
+  );
+
+  url.searchParams.set(
+    "attribute_ids[color]",
+    ""
+  );
+
+  url.searchParams.set(
+    "attribute_ids[material]",
+    ""
+  );
+
+  return url.toString();
+}
+
+function normaliseItem(item) {
+  if (!item?.id) return null;
+
+  const id = String(item.id);
+
+  const relativeUrl =
+    item.url ||
+    `/items/${id}`;
+
+  const url =
+    relativeUrl.startsWith("http")
+      ? relativeUrl
+      : `https://www.vinted.co.uk${relativeUrl}`;
+
+  const image =
     item.photo?.url ||
     item.photo?.full_size_url ||
     item.photos?.[0]?.url ||
     item.photos?.[0]?.full_size_url ||
-    ""
-  );
-}
-
-function normaliseItem(item) {
-  const id = String(item.id || "");
-
-  if (!id) return null;
-
-  const title =
-    item.title ||
-    `Vinted item ${id}`;
+    "";
 
   const price =
     item.price?.amount
@@ -98,31 +160,29 @@ function normaliseItem(item) {
       ? `£${item.total_item_price.amount}`
       : "";
 
-  const relativeUrl =
-    item.url ||
-    `/items/${id}`;
-
-  const url =
-    relativeUrl.startsWith("http")
-      ? relativeUrl
-      : `https://www.vinted.co.uk${relativeUrl}`;
-
   return {
     id,
-    title,
+    title:
+      item.title ||
+      `Vinted item ${id}`,
     price,
     totalPrice,
-    image: photoUrl(item),
+    image,
     url,
-    promoted: item.promoted === true,
-    contentSource: item.content_source || "",
-    favouriteCount: item.favourite_count ?? null,
-    seller: item.user?.login || ""
+    seller:
+      item.user?.login ||
+      "",
+    favouriteCount:
+      item.favourite_count ?? null,
+    promoted:
+      item.promoted === true,
+    contentSource:
+      item.content_source || ""
   };
 }
 
 async function sendListing(item) {
-  const lines = [
+  const caption = [
     "🚨 <b>NEW VINTED LISTING</b>",
     "",
     `<b>${escapeHtml(item.title)}</b>`,
@@ -142,18 +202,21 @@ async function sendListing(item) {
       : "",
     "",
     `<a href="${item.url}">OPEN ON VINTED</a>`
-  ].filter(Boolean);
-
-  const caption = lines.join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   if (item.image) {
     try {
-      await telegramRequest("sendPhoto", {
-        chat_id: TELEGRAM_CHAT_ID,
-        photo: item.image,
-        caption,
-        parse_mode: "HTML"
-      });
+      await telegramRequest(
+        "sendPhoto",
+        {
+          chat_id: TELEGRAM_CHAT_ID,
+          photo: item.image,
+          caption,
+          parse_mode: "HTML"
+        }
+      );
 
       return;
     } catch (error) {
@@ -164,61 +227,75 @@ async function sendListing(item) {
     }
   }
 
-  await telegramRequest("sendMessage", {
-    chat_id: TELEGRAM_CHAT_ID,
-    text: caption,
-    parse_mode: "HTML",
-    disable_web_page_preview: false
-  });
+  await telegramRequest(
+    "sendMessage",
+    {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: caption,
+      parse_mode: "HTML",
+      disable_web_page_preview: false
+    }
+  );
 }
 
-async function getListings(page) {
-  const responsePromise = page.waitForResponse(
-    response => {
-      const url = response.url();
-
-      if (url.includes("/svc-catalogue/items")) {
-        console.log(
-          `🔎 Catalogue response detected: ${response.status()} ${url}`
-        );
-
-        return response.status() === 200;
-      }
-
-      return false;
-    },
-    {
-      timeout: 45000
-    }
-  );
-
-  await page.goto(
-    VINTED_SEARCH_URL,
-    {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    }
-  );
+async function fetchListings() {
+  const url = buildApiUrl();
 
   const response =
-    await responsePromise;
+    await fetch(
+      url,
+      {
+        headers: {
+          "Accept":
+            "application/json, text/plain, */*",
+
+          "Accept-Language":
+            "en-GB,en;q=0.9",
+
+          "User-Agent":
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+
+          "Origin":
+            "https://www.vinted.co.uk",
+
+          "Referer":
+            "https://www.vinted.co.uk/"
+        }
+      }
+    );
+
+  console.log(
+    `Vinted HTTP ${response.status}`
+  );
+
+  if (!response.ok) {
+    const text =
+      await response.text();
+
+    throw new Error(
+      `Vinted API returned ${response.status}: ${text.slice(0, 200)}`
+    );
+  }
 
   const data =
     await response.json();
 
   if (!Array.isArray(data.items)) {
     throw new Error(
-      "Vinted catalogue response contained no items array."
+      "Vinted response contained no items array."
     );
   }
 
+  const items =
+    data.items
+      .map(normaliseItem)
+      .filter(Boolean);
+
   console.log(
-    `Catalogue API returned ${data.items.length} item(s).`
+    `API returned ${items.length} item(s).`
   );
 
-  return data.items
-    .map(normaliseItem)
-    .filter(Boolean);
+  return items;
 }
 
 async function main() {
@@ -229,24 +306,13 @@ async function main() {
     `Loaded ${seen.size} previously seen Vinted item(s).`
   );
 
-  const browser =
-    await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage"
-      ]
-    });
+  console.log(
+    "✅ Direct Vinted API monitor started."
+  );
 
-  const context =
-    await browser.newContext({
-      locale: "en-GB",
-      userAgent:
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-    });
-
-  const page =
-    await context.newPage();
+  console.log(
+    `Checking every ${CHECK_INTERVAL_SECONDS} seconds.`
+  );
 
   let baselineDone =
     seen.size > 0;
@@ -254,48 +320,49 @@ async function main() {
   let errors =
     0;
 
-  console.log(
-    "✅ Vinted API-response monitor started."
-  );
-
-  console.log(
-    `Checking every ${CHECK_INTERVAL_SECONDS} seconds.`
-  );
-
   while (true) {
     try {
       const items =
-        await getListings(page);
+        await fetchListings();
 
-      if (!baselineDone) {
+      if (
+        items.length > 0 &&
+        !baselineDone
+      ) {
         for (const item of items) {
           seen.add(item.id);
         }
 
         saveSeen(seen);
 
-        baselineDone = true;
+        baselineDone =
+          true;
 
         console.log(
           `✅ Baseline saved with ${seen.size} existing item(s).`
         );
       }
 
-      else {
+      else if (baselineDone) {
         const newItems =
           items.filter(
-            item => !seen.has(item.id)
+            item =>
+              !seen.has(item.id)
           );
 
-        if (newItems.length === 0) {
+        if (
+          newItems.length === 0
+        ) {
           console.log(
             "No new Drake's listings."
           );
         }
 
-        if (newItems.length > 0) {
+        if (
+          newItems.length > 0
+        ) {
           console.log(
-            `🚨 ${newItems.length} NEW Drake's listing(s) detected!`
+            `🚨 ${newItems.length} NEW Drake's listing(s)!`
           );
 
           for (
