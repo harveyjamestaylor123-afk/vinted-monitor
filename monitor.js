@@ -1,56 +1,58 @@
 import { chromium } from "playwright";
 import fs from "fs";
+import path from "path";
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const {
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_CHAT_ID,
+  CHECK_INTERVAL_SECONDS = "10",
+  DATA_DIR = "/data",
+  VINTED_SEARCH_URL =
+    "https://www.vinted.co.uk/catalog?search_text=drakes&time=1751320018&brand_ids[]=389025&page=1"
+} = process.env;
 
-const CHECK_INTERVAL_SECONDS =
-  Number(process.env.CHECK_INTERVAL_SECONDS || "10");
-
-const DRAKES_BRAND_ID = "389025";
-
-const SEEN_FILE = "/tmp/vinted_drakes_seen.json";
-
-if (!BOT_TOKEN || !CHAT_ID) {
-  console.error("❌ Missing Telegram environment variables");
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.error("❌ Missing Telegram environment variables.");
   process.exit(1);
 }
 
-let seen = new Set();
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-try {
-  if (fs.existsSync(SEEN_FILE)) {
-    seen = new Set(
-      JSON.parse(
-        fs.readFileSync(SEEN_FILE, "utf8")
-      )
-    );
-  }
-} catch (error) {
-  console.log(
-    "Could not load seen file:",
-    error.message
-  );
-}
-
-function saveSeen() {
-  try {
-    fs.writeFileSync(
-      SEEN_FILE,
-      JSON.stringify([...seen])
-    );
-  } catch (error) {
-    console.error(
-      "Could not save seen file:",
-      error.message
-    );
-  }
-}
+const SEEN_FILE = path.join(
+  DATA_DIR,
+  "vinted_drakes_seen.json"
+);
 
 function sleep(ms) {
   return new Promise(resolve =>
     setTimeout(resolve, ms)
   );
+}
+
+function loadSeen() {
+  try {
+    return new Set(
+      JSON.parse(
+        fs.readFileSync(SEEN_FILE, "utf8")
+      )
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeen(seen) {
+  try {
+    fs.writeFileSync(
+      SEEN_FILE,
+      JSON.stringify([...seen], null, 2)
+    );
+  } catch (error) {
+    console.error(
+      "Could not save seen items:",
+      error.message
+    );
+  }
 }
 
 function escapeHtml(value = "") {
@@ -60,14 +62,26 @@ function escapeHtml(value = "") {
     .replaceAll(">", "&gt;");
 }
 
+function getPhoto(item) {
+  return (
+    item.photo?.url ||
+    item.photo?.full_size_url ||
+    item.photos?.[0]?.url ||
+    item.photos?.[0]?.full_size_url ||
+    ""
+  );
+}
+
 async function telegramRequest(method, body) {
   const response = await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
     {
       method: "POST",
+
       headers: {
         "Content-Type": "application/json"
       },
+
       body: JSON.stringify(body)
     }
   );
@@ -79,18 +93,6 @@ async function telegramRequest(method, body) {
       `Telegram ${data.error_code}: ${data.description}`
     );
   }
-
-  return data;
-}
-
-function getPhoto(item) {
-  return (
-    item.photo?.url ||
-    item.photo?.full_size_url ||
-    item.photos?.[0]?.url ||
-    item.photos?.[0]?.full_size_url ||
-    ""
-  );
 }
 
 async function sendTelegram(item) {
@@ -126,8 +128,9 @@ async function sendTelegram(item) {
     price
       ? `💷 <b>Price:</b> ${escapeHtml(price)}`
       : "",
-    totalPrice && totalPrice !== price
-      ? `🛍 <b>Total:</b> ${escapeHtml(totalPrice)}`
+    totalPrice &&
+    totalPrice !== price
+      ? `🛍 <b>Incl. buyer protection:</b> ${escapeHtml(totalPrice)}`
       : "",
     seller
       ? `👤 <b>Seller:</b> ${escapeHtml(seller)}`
@@ -145,17 +148,24 @@ async function sendTelegram(item) {
       await telegramRequest(
         "sendPhoto",
         {
-          chat_id: CHAT_ID,
+          chat_id:
+            TELEGRAM_CHAT_ID,
+
           photo,
-          caption: message,
-          parse_mode: "HTML"
+
+          caption:
+            message,
+
+          parse_mode:
+            "HTML"
         }
       );
 
       return;
+
     } catch (error) {
       console.log(
-        "Photo failed, sending text:",
+        "Photo send failed, using text:",
         error.message
       );
     }
@@ -164,102 +174,35 @@ async function sendTelegram(item) {
   await telegramRequest(
     "sendMessage",
     {
-      chat_id: CHAT_ID,
-      text: message,
-      parse_mode: "HTML",
-      disable_web_page_preview: false
+      chat_id:
+        TELEGRAM_CHAT_ID,
+
+      text:
+        message,
+
+      parse_mode:
+        "HTML",
+
+      disable_web_page_preview:
+        false
     }
   );
 }
 
-async function fetchDrakes(page) {
-  return await page.evaluate(
-    async brandId => {
-      const params =
-        new URLSearchParams();
-
-      params.set("page", "1");
-      params.set("per_page", "96");
-
-      params.set(
-        "time",
-        String(
-          Math.floor(Date.now() / 1000)
-        )
-      );
-
-      /*
-       * This is the exact endpoint and
-       * brand-filter format observed in
-       * Vinted's own Network request.
-       */
-      params.set(
-        "attribute_ids[brand]",
-        brandId
-      );
-
-      params.set(
-        "attribute_ids[catalog]",
-        ""
-      );
-
-      params.set(
-        "attribute_ids[size]",
-        ""
-      );
-
-      params.set(
-        "attribute_ids[status]",
-        ""
-      );
-
-      params.set(
-        "attribute_ids[color]",
-        ""
-      );
-
-      params.set(
-        "attribute_ids[material]",
-        ""
-      );
-
-      params.set(
-        "order",
-        "newest_first"
-      );
-
-      const url =
-        "https://api.vinted.co.uk/svc-catalogue/items?" +
-        params.toString();
-
-      const response =
-        await fetch(
-          url,
-          {
-            credentials: "include",
-            headers: {
-              Accept:
-                "application/json, text/plain, */*"
-            }
-          }
-        );
-
-      const text =
-        await response.text();
-
-      return {
-        status: response.status,
-        text,
-        url
-      };
-    },
-    DRAKES_BRAND_ID
-  );
-}
-
 async function main() {
+  const seen =
+    loadSeen();
+
   console.log(
-    "🚀 Starting Drake's-only Vinted monitor"
+    `Loaded ${seen.size} previously seen item(s).`
+  );
+
+  console.log(
+    "🚀 Starting Vinted page-refresh monitor."
+  );
+
+  console.log(
+    `Search URL: ${VINTED_SEARCH_URL}`
   );
 
   console.log(
@@ -269,6 +212,7 @@ async function main() {
   const browser =
     await chromium.launch({
       headless: true,
+
       args: [
         "--no-sandbox",
         "--disable-dev-shm-usage",
@@ -278,12 +222,15 @@ async function main() {
 
   const context =
     await browser.newContext({
-      locale: "en-GB",
+      locale:
+        "en-GB",
+
+      timezoneId:
+        "Europe/London",
 
       userAgent:
-        "Mozilla/5.0 (X11; Linux x86_64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/140.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 
       extraHTTPHeaders: {
         "Accept-Language":
@@ -294,22 +241,99 @@ async function main() {
   const page =
     await context.newPage();
 
-  console.log(
-    "Opening Vinted session..."
-  );
+  let latestCatalogue = null;
+  let captureNumber = 0;
 
-  await page.goto(
-    "https://www.vinted.co.uk/catalog?brand_ids[]=389025",
-    {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
+  /*
+   * Listen continuously for the SAME catalogue
+   * response generated by the actual Vinted page.
+   */
+  page.on(
+    "response",
+    async response => {
+      try {
+        const url =
+          response.url();
+
+        const isCatalogue =
+          url.includes(
+            "/svc-catalogue/items"
+          ) ||
+          url.includes(
+            "/api/v2/catalog/items"
+          );
+
+        if (!isCatalogue) {
+          return;
+        }
+
+        console.log(
+          `🔎 Page catalogue response: ${response.status()}`
+        );
+
+        console.log(
+          url
+        );
+
+        if (
+          response.status() !== 200
+        ) {
+          return;
+        }
+
+        const data =
+          await response.json();
+
+        if (
+          !Array.isArray(
+            data.items
+          )
+        ) {
+          return;
+        }
+
+        latestCatalogue =
+          data.items;
+
+        captureNumber++;
+
+        console.log(
+          `✅ Captured ${data.items.length} item(s) from Vinted page.`
+        );
+
+      } catch (error) {
+        console.log(
+          "Catalogue capture warning:",
+          error.message
+        );
+      }
     }
   );
 
-  await page.waitForTimeout(3000);
+  /*
+   * Establish UK Vinted session first.
+   */
+  console.log(
+    "Opening Vinted UK..."
+  );
+
+  await page.goto(
+    "https://www.vinted.co.uk/",
+    {
+      waitUntil:
+        "domcontentloaded",
+
+      timeout:
+        60000
+    }
+  );
+
+  await page.waitForTimeout(
+    2500
+  );
 
   console.log(
-    "✅ Vinted browser session ready."
+    "✅ UK Vinted session ready."
   );
 
   let baselineDone =
@@ -318,59 +342,96 @@ async function main() {
   let errors = 0;
 
   while (true) {
+    const checkStarted =
+      Date.now();
+
     try {
       console.log(
-        "Checking Drake's..."
+        "🔄 Refreshing your Drake's search..."
       );
 
-      const result =
-        await fetchDrakes(page);
+      latestCatalogue =
+        null;
 
-      console.log(
-        `Catalogue HTTP ${result.status}`
+      const captureBefore =
+        captureNumber;
+
+      /*
+       * THIS IS THE IMPORTANT PART:
+       *
+       * We open the exact search page supplied
+       * by you instead of building our own API
+       * search.
+       */
+      await page.goto(
+        VINTED_SEARCH_URL,
+        {
+          waitUntil:
+            "domcontentloaded",
+
+          timeout:
+            60000
+        }
       );
 
-      if (result.status !== 200) {
-        throw new Error(
-          `Vinted returned HTTP ${result.status}`
-        );
+      /*
+       * Wait for the page itself to make its
+       * catalogue request.
+       */
+      const waitStarted =
+        Date.now();
+
+      while (
+        captureNumber ===
+          captureBefore &&
+        Date.now() - waitStarted <
+          20000
+      ) {
+        await sleep(250);
       }
 
-      const data =
-        JSON.parse(result.text);
-
-      if (!Array.isArray(data.items)) {
+      if (
+        captureNumber ===
+          captureBefore ||
+        !Array.isArray(
+          latestCatalogue
+        )
+      ) {
         throw new Error(
-          "Vinted response contained no items array."
+          "Vinted page loaded but no catalogue response was captured."
         );
       }
 
       const items =
-        data.items.filter(
-          item => item && item.id
+        latestCatalogue.filter(
+          item =>
+            item &&
+            item.id
         );
 
       console.log(
-        `Drake's catalogue returned ${items.length} listing(s).`
+        `Page returned ${items.length} listing(s).`
       );
 
       /*
-       * Establish the baseline after every fresh
-       * deployment rather than sending everything.
+       * First successful result becomes baseline.
        */
       if (!baselineDone) {
-        for (const item of items) {
+        for (
+          const item of items
+        ) {
           seen.add(
             String(item.id)
           );
         }
 
-        saveSeen();
+        saveSeen(seen);
 
-        baselineDone = true;
+        baselineDone =
+          true;
 
         console.log(
-          `✅ Baseline created with ${seen.size} listings.`
+          `✅ Baseline saved with ${seen.size} current listing(s).`
         );
       }
 
@@ -384,57 +445,58 @@ async function main() {
           );
 
         /*
-         * SAFETY LOCK:
-         *
-         * A real Drake's update might add one or a
-         * handful of listings.
-         *
-         * If suddenly dozens appear, assume the
-         * filter/API has gone wrong and DO NOT spam
-         * Telegram.
+         * Safety lock against another accidental
+         * flood of unrelated Vinted listings.
          */
-        if (newItems.length > 10) {
+        if (
+          newItems.length > 10
+        ) {
           console.error(
-            `🛑 SAFETY LOCK: ${newItems.length} unseen items returned. No Telegram messages sent.`
+            `🛑 SAFETY LOCK: ${newItems.length} unseen listings appeared.`
           );
 
           console.error(
-            "Possible Vinted filter failure."
+            "Telegram alerts suppressed."
           );
         }
 
-        else if (newItems.length === 0) {
+        else if (
+          newItems.length === 0
+        ) {
           console.log(
-            "No new Drake's listings."
+            "No new listings."
           );
         }
 
         else {
           console.log(
-            `🚨 ${newItems.length} NEW Drake's listing(s).`
+            `🚨 ${newItems.length} NEW listing(s)!`
           );
 
           for (
-            const item of [...newItems].reverse()
+            const item of
+              [...newItems].reverse()
           ) {
             try {
               console.log(
                 `🚨 NEW: ${item.title}`
               );
 
-              await sendTelegram(item);
+              await sendTelegram(
+                item
+              );
 
               seen.add(
                 String(item.id)
               );
 
-              saveSeen();
+              saveSeen(
+                seen
+              );
 
               console.log(
                 `✅ Telegram sent for ${item.id}`
               );
-
-              await sleep(500);
 
             } catch (error) {
               console.error(
@@ -452,29 +514,38 @@ async function main() {
       errors++;
 
       console.error(
-        "❌ Check failed:",
+        "❌ Vinted check failed:",
         error.message
       );
 
-      if (errors >= 3) {
+      if (
+        errors >= 3
+      ) {
         try {
           console.log(
-            "Refreshing Vinted browser session..."
+            "♻️ Re-establishing UK Vinted session..."
           );
 
           await page.goto(
-            "https://www.vinted.co.uk/catalog?brand_ids[]=389025",
+            "https://www.vinted.co.uk/",
             {
-              waitUntil: "domcontentloaded",
-              timeout: 60000
+              waitUntil:
+                "domcontentloaded",
+
+              timeout:
+                60000
             }
           );
 
-          await page.waitForTimeout(3000);
+          await page.waitForTimeout(
+            3000
+          );
 
           errors = 0;
 
-        } catch (refreshError) {
+        } catch (
+          refreshError
+        ) {
           console.error(
             "Session refresh failed:",
             refreshError.message
@@ -483,15 +554,36 @@ async function main() {
       }
     }
 
+    /*
+     * Aim for the chosen interval measured
+     * from the beginning of the check,
+     * rather than adding the interval on top
+     * of however long the check itself took.
+     */
+    const elapsed =
+      Date.now() -
+      checkStarted;
+
+    const target =
+      Number(
+        CHECK_INTERVAL_SECONDS
+      ) * 1000;
+
+    const remaining =
+      Math.max(
+        1000,
+        target - elapsed
+      );
+
     await sleep(
-      CHECK_INTERVAL_SECONDS * 1000
+      remaining
     );
   }
 }
 
 main().catch(error => {
   console.error(
-    "❌ Fatal error:",
+    "❌ Fatal monitor error:",
     error
   );
 
