@@ -173,38 +173,30 @@ async function sendListing(item) {
 }
 
 async function getListings(page) {
-  /*
-   * IMPORTANT:
-   * Start listening BEFORE loading Vinted,
-   * otherwise we'll miss the catalogue response.
-   */
   const responsePromise = page.waitForResponse(
-    response =>
-      response.url().includes(
-        "api.vinted.co.uk/svc-catalogue/items"
-      ) &&
-      response.status() === 200,
+    response => {
+      const url = response.url();
+
+      if (url.includes("/svc-catalogue/items")) {
+        console.log(
+          `🔎 Catalogue response detected: ${response.status()} ${url}`
+        );
+
+        return response.status() === 200;
+      }
+
+      return false;
+    },
     {
-      timeout: 30000
+      timeout: 45000
     }
   );
 
-  /*
-   * Add a changing value so Vinted really reloads
-   * the search rather than serving our old page.
-   */
-  const url = new URL(VINTED_SEARCH_URL);
-
-  url.searchParams.set(
-    "_monitor",
-    String(Date.now())
-  );
-
   await page.goto(
-    url.href,
+    VINTED_SEARCH_URL,
     {
       waitUntil: "domcontentloaded",
-      timeout: 45000
+      timeout: 60000
     }
   );
 
@@ -224,11 +216,6 @@ async function getListings(page) {
     `Catalogue API returned ${data.items.length} item(s).`
   );
 
-  /*
-   * We have a BRAND FILTER in the actual Vinted
-   * catalogue request, so do NOT try to identify
-   * Drake's from random HTML text anymore.
-   */
   return data.items
     .map(normaliseItem)
     .filter(Boolean);
@@ -254,7 +241,6 @@ async function main() {
   const context =
     await browser.newContext({
       locale: "en-GB",
-
       userAgent:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
     });
@@ -281,10 +267,6 @@ async function main() {
       const items =
         await getListings(page);
 
-      /*
-       * On the first successful run, everything
-       * currently visible becomes the baseline.
-       */
       if (!baselineDone) {
         for (const item of items) {
           seen.add(item.id);
@@ -316,10 +298,6 @@ async function main() {
             `🚨 ${newItems.length} NEW Drake's listing(s) detected!`
           );
 
-          /*
-           * Send oldest → newest so Telegram
-           * displays them in logical order.
-           */
           for (
             const item of [...newItems].reverse()
           ) {
@@ -355,9 +333,6 @@ async function main() {
       );
     }
 
-    /*
-     * Don't hammer Vinted if something breaks.
-     */
     const delay =
       errors >= 3
         ? 60000
