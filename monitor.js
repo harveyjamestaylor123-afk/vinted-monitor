@@ -14,48 +14,32 @@ const DRAKES_BRAND_ID = "389025";
 const API_URL =
   "https://api.vinted.co.uk/svc-catalogue/items";
 
-if (
-  !TELEGRAM_BOT_TOKEN ||
-  !TELEGRAM_CHAT_ID
-) {
-  console.error(
-    "❌ Missing Telegram environment variables."
-  );
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.error("❌ Missing Telegram environment variables.");
   process.exit(1);
 }
 
 if (!VINTED_COOKIE) {
-  console.error(
-    "❌ Missing VINTED_COOKIE environment variable."
-  );
+  console.error("❌ Missing VINTED_COOKIE.");
   process.exit(1);
 }
 
-fs.mkdirSync(
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const SEEN_FILE = path.join(
   DATA_DIR,
-  { recursive: true }
+  "vinted_drakes_seen.json"
 );
 
-const SEEN_FILE =
-  path.join(
-    DATA_DIR,
-    "vinted_drakes_seen.json"
-  );
-
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
-  );
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function loadSeen() {
   try {
     return new Set(
       JSON.parse(
-        fs.readFileSync(
-          SEEN_FILE,
-          "utf8"
-        )
+        fs.readFileSync(SEEN_FILE, "utf8")
       )
     );
   } catch {
@@ -66,11 +50,7 @@ function loadSeen() {
 function saveSeen(seen) {
   fs.writeFileSync(
     SEEN_FILE,
-    JSON.stringify(
-      [...seen],
-      null,
-      2
-    )
+    JSON.stringify([...seen], null, 2)
   );
 }
 
@@ -91,28 +71,19 @@ function getPhoto(item) {
   );
 }
 
-async function telegramRequest(
-  method,
-  body
-) {
-  const response =
-    await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
-      {
-        method: "POST",
+async function telegramRequest(method, body) {
+  const response = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
 
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body:
-          JSON.stringify(body)
-      }
-    );
-
-  const data =
-    await response.json();
+  const data = await response.json();
 
   if (!data.ok) {
     throw new Error(
@@ -150,15 +121,13 @@ async function sendTelegram(item) {
     "🚨 <b>NEW DRAKE'S LISTING</b>",
     "",
     `<b>${escapeHtml(
-      item.title ||
-      "New Drake's listing"
+      item.title || "New Drake's listing"
     )}</b>`,
     "",
     price
       ? `💷 <b>Price:</b> ${escapeHtml(price)}`
       : "",
-    totalPrice &&
-    totalPrice !== price
+    totalPrice && totalPrice !== price
       ? `🛍 <b>Incl. buyer protection:</b> ${escapeHtml(totalPrice)}`
       : "",
     seller
@@ -170,31 +139,24 @@ async function sendTelegram(item) {
     .filter(Boolean)
     .join("\n");
 
-  const photo =
-    getPhoto(item);
+  const photo = getPhoto(item);
 
   if (photo) {
     try {
       await telegramRequest(
         "sendPhoto",
         {
-          chat_id:
-            TELEGRAM_CHAT_ID,
-
+          chat_id: TELEGRAM_CHAT_ID,
           photo,
-
           caption,
-
-          parse_mode:
-            "HTML"
+          parse_mode: "HTML"
         }
       );
 
       return;
-
     } catch (error) {
       console.log(
-        "Photo failed, using text:",
+        "Photo send failed, using text:",
         error.message
       );
     }
@@ -203,57 +165,57 @@ async function sendTelegram(item) {
   await telegramRequest(
     "sendMessage",
     {
-      chat_id:
-        TELEGRAM_CHAT_ID,
-
-      text:
-        caption,
-
-      parse_mode:
-        "HTML",
-
-      disable_web_page_preview:
-        false
+      chat_id: TELEGRAM_CHAT_ID,
+      text: caption,
+      parse_mode: "HTML",
+      disable_web_page_preview: false
     }
   );
 }
 
 function buildApiUrl() {
-  const url =
-    new URL(API_URL);
+  const url = new URL(API_URL);
 
   url.searchParams.set(
     "page",
     "1"
   );
 
+  /*
+   * Only watch the newest end of the feed.
+   */
   url.searchParams.set(
     "per_page",
-    "96"
+    "30"
   );
 
   url.searchParams.set(
     "time",
     String(
-      Math.floor(
-        Date.now() / 1000
-      )
+      Math.floor(Date.now() / 1000)
     )
   );
 
   /*
-   * Match your actual UK search.
+   * Exact Drake's search.
    */
   url.searchParams.set(
     "search_text",
     "drakes"
   );
 
+  /*
+   * Most important change:
+   * newest listings first.
+   */
   url.searchParams.set(
     "order",
-    "relevance"
+    "newest_first"
   );
 
+  /*
+   * Vinted Drake's brand ID.
+   */
   url.searchParams.set(
     "attribute_ids[brand]",
     DRAKES_BRAND_ID
@@ -288,43 +250,34 @@ function buildApiUrl() {
 }
 
 async function fetchDrakes() {
-  const url =
-    buildApiUrl();
+  const url = buildApiUrl();
 
-  const response =
-    await fetch(
-      url,
-      {
-        headers: {
-          Accept:
-            "application/json, text/plain, */*",
+  const response = await fetch(
+    url,
+    {
+      headers: {
+        Accept:
+          "application/json, text/plain, */*",
 
-          "Accept-Language":
-            "en-GB,en;q=0.9",
+        "Accept-Language":
+          "en-GB,en;q=0.9",
 
-          "User-Agent":
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 
-          Origin:
-            "https://www.vinted.co.uk",
+        Origin:
+          "https://www.vinted.co.uk",
 
-          Referer:
-            "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1",
+        Referer:
+          "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1",
 
-          /*
-           * Your real UK Vinted browser session.
-           *
-           * This comes from Railway's secret
-           * VINTED_COOKIE variable.
-           */
-          Cookie:
-            VINTED_COOKIE
-        },
+        Cookie:
+          VINTED_COOKIE
+      },
 
-        redirect:
-          "follow"
-      }
-    );
+      redirect: "follow"
+    }
+  );
 
   console.log(
     `Vinted HTTP ${response.status}`
@@ -342,60 +295,26 @@ async function fetchDrakes() {
   const data =
     await response.json();
 
-  if (
-    !Array.isArray(
-      data.items
-    )
-  ) {
+  if (!Array.isArray(data.items)) {
     throw new Error(
       "Vinted response contained no items array."
     );
   }
 
-  return data.items;
-}
-
-function validateDrakes(items) {
-  return items.filter(
-    item => {
-      if (!item?.id) {
-        return false;
-      }
-
-      /*
-       * Brand ID should already restrict
-       * the results.
-       *
-       * This extra check prevents obvious
-       * Drake/Drakes false positives.
-       */
-      const title =
-        String(
-          item.title || ""
-        );
-
-      return (
-        /\bdrake['’]s\b/i.test(
-          title
-        ) ||
-        /\bdrakes\b/i.test(
-          title
-        )
-      );
-    }
+  return data.items.filter(
+    item => item && item.id
   );
 }
 
 async function main() {
-  const seen =
-    loadSeen();
+  const seen = loadSeen();
 
   console.log(
     `Loaded ${seen.size} previously seen item(s).`
   );
 
   console.log(
-    "🇬🇧 Starting UK-session Drake's monitor."
+    "🇬🇧 Starting Drake's newest-first monitor."
   );
 
   console.log(
@@ -405,7 +324,8 @@ async function main() {
   let baselineDone =
     seen.size > 0;
 
-  let failures = 0;
+  let failures =
+    0;
 
   while (true) {
     const started =
@@ -413,42 +333,22 @@ async function main() {
 
     try {
       console.log(
-        "🔎 Checking Drake's..."
+        "🔎 Checking newest Drake's listings..."
       );
-
-      const rawItems =
-        await fetchDrakes();
 
       const items =
-        validateDrakes(
-          rawItems
-        );
+        await fetchDrakes();
 
       console.log(
-        `API returned ${rawItems.length} result(s).`
-      );
-
-      console.log(
-        `Accepted ${items.length} Drake's listing(s).`
+        `API returned ${items.length} Drake's result(s).`
       );
 
       /*
-       * If Vinted suddenly stops applying
-       * the filter, don't Telegram anything.
+       * First run:
+       * silently remember current newest listings.
        */
-      if (
-        rawItems.length > 0 &&
-        items.length === 0
-      ) {
-        throw new Error(
-          "Listings returned but none passed Drake's validation."
-        );
-      }
-
       if (!baselineDone) {
-        for (
-          const item of items
-        ) {
+        for (const item of items) {
           seen.add(
             String(item.id)
           );
@@ -456,7 +356,8 @@ async function main() {
 
         saveSeen(seen);
 
-        baselineDone = true;
+        baselineDone =
+          true;
 
         console.log(
           `✅ Baseline saved with ${seen.size} listing(s).`
@@ -473,13 +374,11 @@ async function main() {
           );
 
         /*
-         * Spam protection.
+         * Prevent another accidental Telegram flood.
          */
-        if (
-          newItems.length > 10
-        ) {
+        if (newItems.length > 10) {
           console.error(
-            `🛑 SAFETY LOCK: ${newItems.length} unseen listings.`
+            `🛑 SAFETY LOCK: ${newItems.length} unseen items.`
           );
 
           console.error(
@@ -500,18 +399,19 @@ async function main() {
             `🚨 ${newItems.length} NEW Drake's listing(s)!`
           );
 
+          /*
+           * Send oldest first if multiple items
+           * arrive in one check.
+           */
           for (
-            const item of
-              [...newItems].reverse()
+            const item of [...newItems].reverse()
           ) {
             try {
               console.log(
                 `🚨 NEW: ${item.title}`
               );
 
-              await sendTelegram(
-                item
-              );
+              await sendTelegram(item);
 
               seen.add(
                 String(item.id)
@@ -523,9 +423,7 @@ async function main() {
                 `✅ Telegram sent for ${item.id}`
               );
 
-              await sleep(
-                400
-              );
+              await sleep(300);
 
             } catch (error) {
               console.error(
@@ -547,23 +445,20 @@ async function main() {
         error.message
       );
 
-      /*
-       * A 401/403 after this was previously
-       * working usually means the Vinted
-       * browser cookie has expired.
-       */
       if (
-        String(error.message)
-          .includes("401") ||
-        String(error.message)
-          .includes("403")
+        String(error.message).includes("401") ||
+        String(error.message).includes("403")
       ) {
         console.error(
-          "⚠️ VINTED_COOKIE may have expired or Vinted may be rejecting Railway's IP."
+          "⚠️ VINTED_COOKIE may have expired."
         );
       }
     }
 
+    /*
+     * Try to keep checks close to the requested
+     * interval from start-to-start.
+     */
     const elapsed =
       Date.now() - started;
 
