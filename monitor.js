@@ -115,6 +115,110 @@ async function extractListings(page) {
     const seen = new Set();
 
     const links = [
+      ...document.querySelectorAll('a[href*="/items/"]')
+    ];
+
+    for (const link of links) {
+      try {
+        const url = new URL(
+          link.href,
+          location.origin
+        );
+
+        const match =
+          url.pathname.match(/\/items\/(\d+)/);
+
+        if (!match) continue;
+
+        const id = match[1];
+
+        if (seen.has(id)) continue;
+
+        const card =
+          link.closest(
+            '[data-testid*="item"], article, li, div[class*="feed-grid"] > div'
+          ) ||
+          link.parentElement?.parentElement ||
+          link;
+
+        const text =
+          (card.innerText || link.innerText || "")
+            .replace(/\s+/g, " ")
+            .trim();
+
+        /*
+         * IMPORTANT:
+         * Ignore recommendations, adverts and unrelated
+         * listings unless the card actually identifies
+         * the brand as Drake's.
+         */
+        const isDrakes =
+          /\bdrake['’]?s\b/i.test(text);
+
+        if (!isDrakes) {
+          continue;
+        }
+
+        const image =
+          card.querySelector("img")?.src ||
+          link.querySelector("img")?.src ||
+          "";
+
+        const lines =
+          (card.innerText || "")
+            .split("\n")
+            .map(x => x.trim())
+            .filter(Boolean);
+
+        let price = "";
+        let size = "";
+
+        for (const line of lines) {
+          if (
+            !price &&
+            /£\s?\d|GBP/i.test(line)
+          ) {
+            price = line;
+          }
+
+          if (
+            !size &&
+            /^(XS|S|M|L|XL|XXL|\d{1,2}(\.\d)?|UK\s?\d+)/i.test(line)
+          ) {
+            size = line;
+          }
+        }
+
+        const title =
+          link.getAttribute("title") ||
+          link.querySelector("img")?.alt ||
+          lines[0] ||
+          text.slice(0, 150) ||
+          `Vinted item ${id}`;
+
+        seen.add(id);
+
+        results.push({
+          id,
+          url: url.href,
+          title,
+          price,
+          size,
+          brand: "Drake's",
+          image
+        });
+
+      } catch {}
+    }
+
+    return results;
+  });
+}
+  return await page.evaluate(() => {
+    const results = [];
+    const seen = new Set();
+
+    const links = [
       ...document.querySelectorAll(
         'a[href*="/items/"]'
       )
