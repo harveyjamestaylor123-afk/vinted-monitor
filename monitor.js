@@ -1,36 +1,28 @@
+import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
 
 const {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
-  VINTED_COOKIE,
+  VINTED_COOKIE = "",
   CHECK_INTERVAL_SECONDS = "10",
   DATA_DIR = "/data"
 } = process.env;
 
-const DRAKES_BRAND_ID = "389025";
-const API_URL =
-  "https://api.vinted.co.uk/svc-catalogue/items";
+const SEARCH_URL =
+  "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1&order=newest_first";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("❌ Missing Telegram variables.");
   process.exit(1);
 }
 
-if (!VINTED_COOKIE) {
-  console.error("❌ Missing VINTED_COOKIE.");
-  process.exit(1);
-}
-
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-/*
- * New state file so we start this version cleanly.
- */
 const SEEN_FILE = path.join(
   DATA_DIR,
-  "vinted_drakes_seen_v2.json"
+  "vinted_visible_seen.json"
 );
 
 function sleep(ms) {
@@ -63,14 +55,34 @@ function escapeHtml(value = "") {
     .replaceAll(">", "&gt;");
 }
 
-function getPhoto(item) {
-  return (
-    item.photo?.url ||
-    item.photo?.full_size_url ||
-    item.photos?.[0]?.url ||
-    item.photos?.[0]?.full_size_url ||
-    ""
-  );
+function parseCookieString(cookieString) {
+  if (!cookieString) return [];
+
+  return cookieString
+    .split(";")
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => {
+      const index = part.indexOf("=");
+
+      if (index === -1) return null;
+
+      const name =
+        part.slice(0, index).trim();
+
+      const value =
+        part.slice(index + 1).trim();
+
+      if (!name) return null;
+
+      return {
+        name,
+        value,
+        domain: ".vinted.co.uk",
+        path: "/"
+      };
+    })
+    .filter(Boolean);
 }
 
 async function telegramRequest(method, body) {
@@ -95,59 +107,30 @@ async function telegramRequest(method, body) {
 }
 
 async function sendTelegram(item) {
-  const relativeUrl =
-    item.url ||
-    `/items/${item.id}`;
-
-  const itemUrl =
-    relativeUrl.startsWith("http")
-      ? relativeUrl
-      : `https://www.vinted.co.uk${relativeUrl}`;
-
-  const price =
-    item.price?.amount
-      ? `£${item.price.amount}`
-      : "";
-
-  const totalPrice =
-    item.total_item_price?.amount
-      ? `£${item.total_item_price.amount}`
-      : "";
-
-  const seller =
-    item.user?.login || "";
-
   const caption = [
     "🚨 <b>NEW DRAKE'S LISTING</b>",
     "",
-    `<b>${escapeHtml(
-      item.title || "New Drake's listing"
-    )}</b>`,
+    `<b>${escapeHtml(item.title)}</b>`,
     "",
-    price
-      ? `💷 <b>Price:</b> ${escapeHtml(price)}`
+    item.details
+      ? escapeHtml(item.details)
       : "",
-    totalPrice && totalPrice !== price
-      ? `🛍 <b>Incl. buyer protection:</b> ${escapeHtml(totalPrice)}`
-      : "",
-    seller
-      ? `👤 <b>Seller:</b> ${escapeHtml(seller)}`
+    item.price
+      ? `💷 <b>${escapeHtml(item.price)}</b>`
       : "",
     "",
-    `<a href="${itemUrl}">OPEN ON VINTED</a>`
+    `<a href="${item.url}">OPEN ON VINTED</a>`
   ]
     .filter(Boolean)
     .join("\n");
 
-  const photo = getPhoto(item);
-
-  if (photo) {
+  if (item.image) {
     try {
       await telegramRequest(
         "sendPhoto",
         {
           chat_id: TELEGRAM_CHAT_ID,
-          photo,
+          photo: item.image,
           caption,
           parse_mode: "HTML"
         }
@@ -174,22 +157,197 @@ async function sendTelegram(item) {
   );
 }
 
-function buildApiUrl() {
-  const url = new URL(API_URL);
+async function extractVisibleItems(page) {
+  return await page.evaluate(() => {
+    const results = [];
+    const usedIds = new Set();
 
-  url.searchParams.set("page", "1");
+    const links =
+      Array.from(
+        document.querySelectorAll(
+          'a[href*="/items/"]'
+        )
+      );
 
+    for (const link of links) {
+      try {
+        const url =
+          new URL(
+            link.href,
+            window.location.origin
+          );
+
+        const match =
+          url.pathname.match(
+            /\/items\/(\d+)/
+          );
+
+        if (!match) continue;
+
+        const id = match[1];
+
+        if (usedIds.has(id)) {
+          continue;
+        }
+
+        /*
+         * Find the surrounding Vinted product card.
+         */
+        let card = link;
+
+        for (let i = 0; i < 6; i++) {
+          if (!card.parentElement) break;
+
+          card = card.parentElement;
+
+          const text =
+            card.innerText || "";
+
+          const hasPrice =
+            /£\s?\d/.test(text);
+
+          const hasImage =
+            Boolean(
+              card.querySelector("img")
+            );
+
+          if (hasPrice && hasImage) {
+            break;
+          }
+        }
+
+        const rawText =
+          card?.innerText ||
+          link.innerText ||
+          "";
+
+        const lines =
+          rawText
+            .split("\n")
+            .map(x => x.trim())
+            .filter(Boolean);
+
+        /*
+         * Require Drake's to be visible on the card.
+         * This is a final defensive check.
+         */
+        const combined =
+          lines.join(" ");
+
+        if (
+          !/\bdrake['’]?s\b/i.test(
+            combined
+          )
+        ) {
+          continue;
+        }
+
+        const image =
+          card?.querySelector("img")?.src ||
+          link.querySelector("img")?.src ||
+          "";
+
+        const imageAlt =
+          card?.querySelector("img")?.alt ||
+          "";
+
+        let price = "";
+
+        for (const line of lines) {
+          if (
+            /^£\s?\d/.test(line) ||
+            /£\d/.test(line)
+          ) {
+            price = line;
+            break;
+          }
+        }
+
+        /*
+         * Vinted card text normally includes:
+         *
+         * Drake's
+         * size · condition
+         * £price
+         *
+         * The image alt/title often contains
+         * the actual listing title.
+         */
+        let title =
+          link.getAttribute("title") ||
+          imageAlt ||
+          "";
+
+        if (!title) {
+          /*
+           * Fall back to URL slug.
+           */
+          const slug =
+            url.pathname
+              .replace(
+                `/items/${id}-`,
+                ""
+              )
+              .replaceAll("-", " ");
+
+          title =
+            slug ||
+            `Drake's item ${id}`;
+        }
+
+        /*
+         * Clean Vinted image alt text when it
+         * contains extra wording.
+         */
+        title =
+          String(title)
+            .replace(/\s+/g, " ")
+            .trim();
+
+        const details =
+          lines
+            .filter(line => {
+              if (line === price) return false;
+
+              if (
+                /^£\s?\d/.test(line)
+              ) {
+                return false;
+              }
+
+              return true;
+            })
+            .slice(0, 3)
+            .join(" · ");
+
+        usedIds.add(id);
+
+        results.push({
+          id,
+          title,
+          details,
+          price,
+          image,
+          url: url.href
+        });
+
+      } catch {
+        // Ignore malformed cards.
+      }
+    }
+
+    return results;
+  });
+}
+
+async function loadNewestPage(page) {
   /*
-   * Keep the full first page.
+   * Change the existing Vinted time parameter
+   * each visit to discourage cached results.
    */
-  url.searchParams.set(
-    "per_page",
-    "96"
-  );
+  const url =
+    new URL(SEARCH_URL);
 
-  /*
-   * Fresh request timestamp.
-   */
   url.searchParams.set(
     "time",
     String(
@@ -197,111 +355,37 @@ function buildApiUrl() {
     )
   );
 
-  url.searchParams.set(
-    "search_text",
-    "drakes"
-  );
-
-  /*
-   * Critical:
-   * ask Vinted for newest listings first.
-   */
-  url.searchParams.set(
-    "order",
-    "newest_first"
-  );
-
-  /*
-   * Drake's brand ID from your real Vinted search.
-   */
-  url.searchParams.set(
-    "attribute_ids[brand]",
-    DRAKES_BRAND_ID
-  );
-
-  url.searchParams.set(
-    "attribute_ids[catalog]",
-    ""
-  );
-
-  url.searchParams.set(
-    "attribute_ids[size]",
-    ""
-  );
-
-  url.searchParams.set(
-    "attribute_ids[status]",
-    ""
-  );
-
-  url.searchParams.set(
-    "attribute_ids[color]",
-    ""
-  );
-
-  url.searchParams.set(
-    "attribute_ids[material]",
-    ""
-  );
-
-  return url.toString();
-}
-
-async function fetchDrakes() {
-  const url = buildApiUrl();
-
-  const response = await fetch(
-    url,
+  await page.goto(
+    url.toString(),
     {
-      headers: {
-        Accept:
-          "application/json, text/plain, */*",
-
-        "Accept-Language":
-          "en-GB,en;q=0.9",
-
-        "User-Agent":
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-
-        Origin:
-          "https://www.vinted.co.uk",
-
-        Referer:
-          "https://www.vinted.co.uk/catalog?search_text=drakes&brand_ids[]=389025&page=1",
-
-        Cookie:
-          VINTED_COOKIE
-      },
-
-      redirect: "follow"
+      waitUntil: "domcontentloaded",
+      timeout: 60000
     }
   );
 
-  console.log(
-    `Vinted HTTP ${response.status}`
-  );
-
-  if (!response.ok) {
-    const body =
-      await response.text();
-
+  /*
+   * Wait for actual item links rather than an
+   * arbitrary network request.
+   */
+  try {
+    await page.waitForSelector(
+      'a[href*="/items/"]',
+      {
+        timeout: 15000
+      }
+    );
+  } catch {
     throw new Error(
-      `Vinted returned ${response.status}: ${body.slice(0, 180)}`
+      "No Vinted item cards appeared on the page."
     );
   }
 
-  const data =
-    await response.json();
+  /*
+   * Give React a little time to finish rendering.
+   */
+  await page.waitForTimeout(1200);
 
-  if (!Array.isArray(data.items)) {
-    throw new Error(
-      "Vinted response contained no items array."
-    );
-  }
-
-  return data.items.filter(
-    item => item && item.id
-  );
+  return await extractVisibleItems(page);
 }
 
 async function main() {
@@ -312,50 +396,123 @@ async function main() {
   );
 
   console.log(
-    "🚀 Drake's newest-first monitor started."
+    "🚀 Starting ACTUAL Vinted page monitor."
+  );
+
+  console.log(
+    "🇬🇧 Drake's — Newest first"
   );
 
   console.log(
     `Checking every ${CHECK_INTERVAL_SECONDS} seconds.`
   );
 
+  const browser =
+    await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage"
+      ]
+    });
+
+  const context =
+    await browser.newContext({
+      locale: "en-GB",
+      timezoneId: "Europe/London",
+
+      viewport: {
+        width: 1440,
+        height: 1200
+      },
+
+      userAgent:
+        "Mozilla/5.0 (X11; Linux x86_64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/140.0.0.0 Safari/537.36"
+    });
+
+  /*
+   * If you added your UK Vinted cookie in
+   * Railway, apply it to the real browser.
+   */
+  if (VINTED_COOKIE) {
+    try {
+      const cookies =
+        parseCookieString(
+          VINTED_COOKIE
+        );
+
+      if (cookies.length > 0) {
+        await context.addCookies(
+          cookies
+        );
+
+        console.log(
+          `✅ Loaded ${cookies.length} Vinted session cookie(s).`
+        );
+      }
+
+    } catch (error) {
+      console.log(
+        "Cookie warning:",
+        error.message
+      );
+    }
+  }
+
+  const page =
+    await context.newPage();
+
   let baselineDone =
     seen.size > 0;
 
+  let errors = 0;
+
   while (true) {
-    const started = Date.now();
+    const started =
+      Date.now();
 
     try {
       console.log(
-        "🔎 Checking newest Drake's listings..."
+        "🔄 Loading Drake's newest-first page..."
       );
 
       const items =
-        await fetchDrakes();
+        await loadNewestPage(
+          page
+        );
 
       console.log(
-        `API returned ${items.length} item(s).`
+        `✅ Page contains ${items.length} Drake's item(s).`
       );
 
       /*
-       * Diagnostic:
-       * show exactly what Vinted considers
-       * the newest 10 results.
+       * This is the crucial diagnostic.
+       *
+       * Compare these to the first products
+       * shown on your own Vinted page.
        */
       console.log(
-        "TOP 10 FROM VINTED:"
+        "TOP VISIBLE ITEMS:"
       );
 
       for (
-        const item of items.slice(0, 10)
+        const item of items.slice(0, 8)
       ) {
         console.log(
-          `${item.id} | ${item.title}`
+          `${item.id} | ${item.title} | ${item.price}`
+        );
+      }
+
+      if (items.length === 0) {
+        throw new Error(
+          "Page loaded but no Drake's cards were extracted."
         );
       }
 
       /*
-       * First successful run becomes baseline.
+       * Establish baseline on first successful run.
        */
       if (!baselineDone) {
         for (const item of items) {
@@ -369,7 +526,7 @@ async function main() {
         baselineDone = true;
 
         console.log(
-          `✅ Baseline saved with ${seen.size} item(s).`
+          `✅ Baseline created with ${seen.size} current item(s).`
         );
       }
 
@@ -383,15 +540,15 @@ async function main() {
           );
 
         /*
-         * Prevent another flood.
+         * Protect against another accidental flood.
          */
-        if (newItems.length > 10) {
+        if (newItems.length > 8) {
           console.error(
-            `🛑 SAFETY LOCK: ${newItems.length} unseen items returned.`
+            `🛑 SAFETY LOCK: ${newItems.length} unseen items appeared.`
           );
 
           console.error(
-            "No Telegram messages sent."
+            "Telegram alerts suppressed."
           );
         }
 
@@ -409,14 +566,17 @@ async function main() {
           );
 
           for (
-            const item of [...newItems].reverse()
+            const item of
+              [...newItems].reverse()
           ) {
             try {
               console.log(
                 `🚨 NEW: ${item.id} | ${item.title}`
               );
 
-              await sendTelegram(item);
+              await sendTelegram(
+                item
+              );
 
               seen.add(
                 String(item.id)
@@ -440,24 +600,35 @@ async function main() {
         }
       }
 
+      errors = 0;
+
     } catch (error) {
+      errors++;
+
       console.error(
         "❌ Check failed:",
         error.message
       );
 
-      if (
-        String(error.message).includes("401") ||
-        String(error.message).includes("403")
-      ) {
-        console.error(
-          "⚠️ Your VINTED_COOKIE may need refreshing."
+      if (errors >= 3) {
+        console.log(
+          "♻️ Creating fresh Vinted page..."
         );
+
+        try {
+          await page.close();
+        } catch {}
+
+        page =
+          await context.newPage();
+
+        errors = 0;
       }
     }
 
     const elapsed =
-      Date.now() - started;
+      Date.now() -
+      started;
 
     const target =
       Number(
