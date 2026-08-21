@@ -1,0 +1,11 @@
+{
+  "name": "vinted-monitor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node monitor.js"
+  },
+  "dependencies": {
+    "playwright": "^1.54.2"
+  }
+}
